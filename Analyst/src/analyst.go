@@ -57,7 +57,7 @@ func termboxQuery() string {
 	termbox.SetInputMode(termbox.InputEsc)
 	edit_box.InsertRune('#')
 
-	// Queries the user for a hastag to search
+	// Queries the user for a hashtag to search
 	redraw_all()
 	query := ""
 	stringSlices := make([]rune, 0)
@@ -112,11 +112,19 @@ func termboxQuery() string {
 
 func main() {
 	// Query the user for a search entry
-	query := termboxQuery()
+	searchQuery := termboxQuery()
 	// Deal with the empty cases
-	if query == "" || query == "#" || query == " " || query == "# " {
+	if searchQuery == "" || searchQuery == "#" || searchQuery == " " || searchQuery == "# " {
 		return
 	}
+	searchTweetCount := 0
+
+	// Query for the second search entry
+	compareQuery := termboxQuery()
+	if compareQuery == "" || compareQuery == "#" || compareQuery == " " || compareQuery == "# " {
+		return
+	}
+	compareTweetCount := 0
 
 	// Read OAuth credentials from config file
 	flag.Usage = usage
@@ -125,6 +133,7 @@ func main() {
 		log.Fatalf("Error reading configuration, %v", err)
 	}
 
+	// Connect to the default MongoDB session
 	mdbSession, mdbErr := mgo.Dial("127.0.0.1:27017")
 	if mdbErr != nil {
 		panic(mdbErr)
@@ -137,34 +146,91 @@ func main() {
 		&oauthClient,
 		&accessToken,
 		"https://stream.twitter.com/1.1/statuses/filter.json",
-		url.Values{"track": {query}})
+		url.Values{"track": {searchQuery}})
 	if tsErr != nil {
 		log.Fatal(tsErr)
 	}
 	defer ts.Close()
 
-	tweetCollection := mdbSession.DB("test").C("Tweets")
+	cs, csErr := twitterstream.Open(
+		&oauthClient,
+		&accessToken,
+		"https://stream.twitter.com/1.1/statuses/filter.json",
+		url.Values{"track": {compareQuery}})
+	if csErr != nil {
+		log.Fatal(csErr)
+	}
+	defer cs.Close()
+
+	queryTweetCollection := mdbSession.DB("test").C("QueryTweets")
+	compareTweetCollection := mdbSession.DB("test").C("CompareTweets")
 	// Loop until stream has a permanent error.
-	for ts.Err() == nil {
+	for ts.Err() == nil && cs.Err() == nil {
 		// As each tweet comes in, mine it for data and print it
-		var t anaconda.Tweet
-		if tweetErr := ts.UnmarshalNext(&t); tweetErr != nil {
-			log.Fatal(tweetErr)
+		var qt anaconda.Tweet
+		var ct anaconda.Tweet
+		if queryTweetErr := ts.UnmarshalNext(&qt); queryTweetErr != nil {
+			log.Fatal(queryTweetErr)
 		}
-		fmt.Print("Username: @", t.User.ScreenName, "\n")
-		fmt.Print("Tweet: ", t.Text, "\n")
-		fmt.Print("URL: https://twitter.com/", t.User.ScreenName, "/status/", t.Id)
+		if compareTweetErr := cs.UnmarshalNext(&ct); compareTweetErr != nil {
+			log.Fatal(compareTweetErr)
+		}
+		fmt.Print("Username: @", qt.User.ScreenName, "\n")
+		fmt.Print("Tweet: ", qt.Text, "\n")
+		fmt.Print("URL: https://twitter.com/", qt.User.ScreenName, "/status/", qt.Id, "\n")
+		queryTweetTime, queryTimeErr := qt.CreatedAtTime()
+		if queryTimeErr != nil {
+			panic(queryTimeErr)
+		}
+		fmt.Print("Time created: ", queryTweetTime.String())
 		fmt.Println()
 		fmt.Println()
+		searchTweetCount += 1
+		if searchTweetCount == 25 {
+			ts.Close()
+		}
+		fmt.Print("Username: @", ct.User.ScreenName, "\n")
+		fmt.Print("Tweet: ", ct.Text, "\n")
+		fmt.Print("URL: https://twitter.com/", ct.User.ScreenName, "/status/", ct.Id, "\n")
+		compareTweetTime, compareTimeErr := ct.CreatedAtTime()
+		if compareTimeErr != nil {
+			panic(compareTimeErr)
+		}
+		fmt.Print("Time created: ", compareTweetTime.String())
+		fmt.Println()
+		fmt.Println()
+		compareTweetCount += 1
+		if compareTweetCount == 25 {
+			cs.Close()
+		}
 		tweetM := bson.M {
-			"ScreenName":t.User.ScreenName,
-			"Text":t.Text,
-			"Id":t.Id,
+			"ScreenName":qt.User.ScreenName,
+			"Text":qt.Text,
+			"Id":qt.Id,
+			"CreatedAt":queryTweetTime,
 		}
-		insertErr := tweetCollection.Insert(&tweetM)
-		if insertErr != nil {
-			log.Fatal(insertErr)
+		queryInsertErr := queryTweetCollection.Insert(&tweetM)
+		if queryInsertErr != nil {
+			log.Fatal(queryInsertErr)
+		}
+		compareM := bson.M {
+			"ScreenName":ct.User.ScreenName,
+			"Text":ct.Text,
+			"Id":ct.Id,
+			"CreatedAt":compareTweetTime,
+		}
+		compareInsertErr := compareTweetCollection.Insert(&compareM)
+		if compareInsertErr != nil {
+			log.Fatal(compareInsertErr)
 		}
 	}
-	log.Print(ts.Err)
+	if ts.Err != nil {
+		log.Print(ts.Err)
+	}
+	if cs.Err != nil {
+		log.Print(cs.Err)
+	}
+
+	// Analyze data from database here
+
 }
